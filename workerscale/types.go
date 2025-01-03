@@ -60,6 +60,12 @@ type MachineSetInfo struct {
 	CurrentReplicas int
 }
 
+// MachinePool of a ROSA cluster
+type MachinePool struct {
+	ID       string `json:"id"`
+	Replicas int    `json:"replicas"`
+}
+
 // ProviderStatusCondition of a machine
 type ProviderStatusCondition struct {
 	LastTransitionTime metav1.Time `json:"lastTransitionTime"`

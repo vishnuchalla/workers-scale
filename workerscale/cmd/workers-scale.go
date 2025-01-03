@@ -150,6 +150,9 @@ var rootCmd = &cobra.Command{
 		} else {
 			isHCP = false
 		}
+		if isHCP {
+			metricsScraper.SummaryMetadata[wscale.ClusterType] = wscale.RosaHCP
+		}
 		imageId := scenario.OrchestrateWorkload(wscale.ScaleConfig{
 			UUID:                  uuid,
 			AdditionalWorkerNodes: additionalWorkerNodes,

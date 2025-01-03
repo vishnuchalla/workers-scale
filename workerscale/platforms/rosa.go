@@ -76,11 +76,22 @@ func (rosaScenario *RosaScenario) OrchestrateWorkload(scaleConfig wscale.ScaleCo
 		wscale.FinalizeMetrics(&sync.Map{}, scaledMachineDetails, scaleConfig.Metadata, scaleConfig.Indexer, amiID, scaleConfig.ScaleEventEpoch)
 		return amiID
 	} else {
+		verifyRosaInstall()
+		var machinePools []wscale.MachinePool
+		cmd := exec.Command("rosa", "list", "machinepool", "--cluster", clusterID, "--output", "json")
+		mpOutput, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Fatalf("Unable to list machinepools: %v. Output: %s", err, string(mpOutput))
+		}
+		err = json.Unmarshal(mpOutput, &machinePools)
+		if err != nil {
+			log.Fatalf("Error parsing JSON output: %v\n", err)
+		}
 		prevMachineDetails, _ := getMachineDetails(machineClient, 0, clusterID, hcNamespace, scaleConfig.IsHCP)
 		wscale.SetupMetrics(scaleConfig.UUID, scaleConfig.Metadata, kubeClientProvider)
 		measurements.Start()
 
-		triggerTime = editMachinepool(clusterID, len(prevMachineDetails), len(prevMachineDetails)+scaleConfig.AdditionalWorkerNodes, scaleConfig.AutoScalerEnabled, scaleConfig.IsHCP)
+		triggerTime = editMachinepool(clusterID, machinePools, scaleConfig.AdditionalWorkerNodes, scaleConfig.AutoScalerEnabled)
 		if scaleConfig.AutoScalerEnabled {
 			triggerJob, triggerTime = core.CreateBatchJob(clientSet)
 			// Slightly more delay for the cluster autoscaler resources to come up
@@ -96,13 +107,13 @@ func (rosaScenario *RosaScenario) OrchestrateWorkload(scaleConfig wscale.ScaleCo
 			log.Error(err.Error())
 		}
 		wscale.FinalizeMetrics(&sync.Map{}, scaledMachineDetails, scaleConfig.Metadata, scaleConfig.Indexer, amiID, triggerTime.Unix())
+		if scaleConfig.AutoScalerEnabled {
+			core.DeleteBatchJob(clientSet, triggerJob)
+			time.Sleep(1 * time.Minute)
+		}
 		if scaleConfig.GC {
 			log.Info("Restoring machine pool to previous state")
-			editMachinepool(clusterID, len(prevMachineDetails), len(prevMachineDetails), scaleConfig.AutoScalerEnabled, scaleConfig.IsHCP)
-			if scaleConfig.AutoScalerEnabled {
-				core.DeleteBatchJob(clientSet, triggerJob)
-				time.Sleep(5 * time.Minute)
-			}
+			editMachinepool(clusterID, machinePools, 0, scaleConfig.AutoScalerEnabled)
 			log.Info("Waiting for the machinesets to scale down")
 			if err = waitForWorkers(machineClient, clusterID, hcNamespace, scaleConfig.IsHCP); err != nil {
 				log.Fatalf("Error waiting for MachineSets to scale down: %v", err)
@@ -113,30 +124,34 @@ func (rosaScenario *RosaScenario) OrchestrateWorkload(scaleConfig wscale.ScaleCo
 }
 
 // editMachinepool edits machinepool to desired replica count
-func editMachinepool(clusterID string, minReplicas int, maxReplicas int, autoScalerEnabled bool, mcPresence bool) time.Time {
-	verifyRosaInstall()
-	var machinePoolName string
+func editMachinepool(clusterID string, machinePools []wscale.MachinePool, additionalWorkerNodes int, autoScalerEnabled bool) time.Time {
+	quotient := additionalWorkerNodes / len(machinePools)
+	remainder := additionalWorkerNodes % len(machinePools)
+	if additionalWorkerNodes == 0 {
+		quotient = 0
+		remainder = 0
+	}
+	for _, machinePool := range machinePools {
+		cmdArgs := []string{"edit", "machinepool", "-c", clusterID, machinePool.ID, fmt.Sprintf("--enable-autoscaling=%t", autoScalerEnabled)}
+		if autoScalerEnabled {
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--min-replicas=%d", machinePool.Replicas))
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--max-replicas=%d", machinePool.Replicas+quotient+(remainder&1)))
+		} else {
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--replicas=%d", machinePool.Replicas+quotient+(remainder&1)))
+		}
+		cmd := exec.Command("bash", "-c", "rosa"+" "+strings.Join(cmdArgs, " "))
+		editOutput, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Fatalf("Failed to edit machinepool: %v. Output: %s", err, string(editOutput))
+		}
+		log.Infof("Machinepool %v edited successfully on cluster: %v", machinePool.ID, clusterID)
+		log.Debug(string(editOutput))
+		if remainder > 0 {
+			remainder--
+		}
+	}
 	triggerTime := time.Now().UTC().Truncate(time.Second)
-	if mcPresence {
-		machinePoolName = "workers"
-	} else {
-		machinePoolName = "worker"
-	}
-	cmdArgs := []string{"edit", "machinepool", "-c", clusterID, machinePoolName, fmt.Sprintf("--enable-autoscaling=%t", autoScalerEnabled)}
-	if autoScalerEnabled {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--min-replicas=%d", minReplicas))
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--max-replicas=%d", maxReplicas))
-	} else {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--replicas=%d", maxReplicas))
-	}
-	cmd := exec.Command("bash", "-c", "rosa"+" "+strings.Join(cmdArgs, " "))
-	editOutput, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Fatalf("Failed to edit machinepool: %v. Output: %s", err, string(editOutput))
-	}
-	log.Infof("Machinepool edited successfully on cluster: %v", clusterID)
 	time.Sleep(1 * time.Minute)
-	log.Debug(string(editOutput))
 	return triggerTime
 }
 

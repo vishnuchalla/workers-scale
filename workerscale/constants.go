@@ -17,7 +17,9 @@ package workerscale
 import "time"
 
 // Resource constants
+const RosaHCP = "rosa-hcp"
 const JobName = "workers-scale"
+const ClusterType = "clusterType"
 const MachineNamespace = "openshift-machine-api"
 const DefaultNamespace = "default"
 const DefaultClusterAutoScaler = "default"
